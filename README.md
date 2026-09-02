@@ -14,4 +14,8 @@ Requirements
   - Cinnamon Desktop Environment (Linux Mint, Debian, Fedora, etc.)
   - No special setup (just install into ``~/.local/share/cinnamon/extensions/exclusive-fullscreen@pointblank`` and toggle on)
 
-Credits to [mttbernardini/fullscreen-to-workspace](https://github.com/mttbernardini/fullscreen-to-workspace) for inspiration, and Proton's Lumo AI for writing all 198 lines of js
+Credits to [mttbernardini/fullscreen-to-workspace](https://github.com/mttbernardini/fullscreen-to-workspace) for inspiration, and Proton's Lumo AI for writing all the js.   
+
+
+>Small props to Brave's Leo AI for coming up with one function slightly more robust than what Lumo did; I carried that over from [my old version of this extension](https://github.com/Ao1Pointblank/fullscreen-to-workspace).  
+(i opted to keep ``_isFull`` window geometry check as a fallback if ``is_fullscreen()`` fails. this combination puts me slightly over my preferred 200 line max budget but i think it is worth it)
