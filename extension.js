@@ -106,6 +106,10 @@ function _geom(w) {
 }
 
 function _isFull(w) {
+    // Prefer native WM flag if available (more accurate for sandboxed apps)
+    if (typeof w.is_fullscreen === 'function' && w.is_fullscreen())
+        return true;
+    // Fallback to geometry check for older Muffin versions
     const m = global.screen.get_monitor_geometry(w.get_monitor());
     const r = _geom(w);
     return r.x <= m.x && r.y <= m.y &&
