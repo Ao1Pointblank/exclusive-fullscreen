@@ -1,0 +1,14 @@
+{
+    "uuid": "exclusive-fullscreen@pointblank",
+    "cinnamon-version": [
+        "5.4",
+        "6.0",
+        "6.2",
+        "6.4"
+    ],
+    "dangerous": false,
+    "name": "Exclusive Fullscreen",
+    "description": "When a window enters fullscreen mode, move it to an exclusive workspace named after the application.",
+    "url": "https://github.com/pointblank/fullscreen-to-workspace",
+    "author": "pointblank"
+}
