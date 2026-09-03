@@ -2,8 +2,7 @@ const Meta = imports.gi.Meta;
 const Gio  = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 
-let dedicated, names, conns, ids, gsettings, baseNames, scheduled;
-let pendingClaims, pendingReleases;
+let dedicated, names, conns, ids, gsettings, baseNames, scheduled, pend;
 
 function init() {}
 
@@ -13,8 +12,7 @@ function enable() {
     conns     = new Map();
     ids       = [];
     scheduled = false;
-    pendingClaims   = new Map();
-    pendingReleases = new Map();
+    pend      = new Map(); // Meta.Window -> { id: timer id, kind: 'claim'|'release' }
     gsettings = new Gio.Settings({ schema_id: 'org.cinnamon.desktop.wm.preferences' });
     baseNames = gsettings.get_strv('workspace-names');
     ids.push(global.screen.connect('window-added', (s, w) => _track(w)));
@@ -28,12 +26,9 @@ function disable() {
     for (const [w, list] of conns)
         list.forEach(id => { try { w.disconnect(id); } catch (e) {} });
     conns.clear();
-    for (const [, id] of pendingClaims)
-        try { GLib.source_remove(id); } catch (e) {}
-    for (const [, id] of pendingReleases)
-        try { GLib.source_remove(id); } catch (e) {}
-    pendingClaims.clear();
-    pendingReleases.clear();
+    for (const [, p] of pend)
+        try { GLib.source_remove(p.id); } catch (e) {}
+    pend.clear();
     dedicated.clear();
     names.clear();
     gsettings.reset('workspace-names');
@@ -53,10 +48,10 @@ function _sched() {
 function _flush() {
     for (const [w, rec] of Array.from(dedicated)) {
         if (w.get_compositor_priv && !w.get_compositor_priv()) {
-            _cancelPending(w);
+            _unpend(w);
             dedicated.delete(w); names.delete(rec.ws); _dropWs(rec.ws); continue;
         }
-        if (!_isFull(w)) _releaseDeferred(w);
+        if (!_isFull(w)) _pend(w, 'release');
     }
     for (const [w, rec] of Array.from(dedicated)) {
         if (w.is_on_all_workspaces()) continue;
@@ -65,7 +60,7 @@ function _flush() {
     for (const a of global.get_window_actors()) {
         const w = a.meta_window;
         if (dedicated.has(w)) continue;
-        if (conns.has(w) && _isFull(w)) _claimDeferred(w);
+        if (conns.has(w) && _isFull(w)) _pend(w, 'claim');
         else {
             const ws = w.get_workspace();
             if (ws && names.has(ws)) _evict(ws, null);
@@ -94,7 +89,17 @@ function _track(w) {
         w.connect('size-changed',  () => _sched()),
         w.connect('position-changed', () => _sched()),
         w.connect('workspace-changed', () => _sched()),
-        w.connect('unmanaged',     () => { conns.delete(w); _cancelPending(w); _sched(); })
+        w.connect('unmanaged',     () => {
+            conns.delete(w);
+            _unpend(w);
+            const rec = dedicated.get(w);
+            if (rec) {
+                dedicated.delete(w);
+                names.delete(rec.ws);
+                _dropWs(rec.ws, true);         // delayed so Muffin can finish teardown
+            }
+            _sched();
+        })
     ]);
     if (_isFull(w)) _sched();
 }
@@ -106,10 +111,7 @@ function _geom(w) {
 }
 
 function _isFull(w) {
-    // Prefer native WM flag if available (more accurate for sandboxed apps)
-    if (typeof w.is_fullscreen === 'function' && w.is_fullscreen())
-        return true;
-    // Fallback to geometry check for older Muffin versions
+    if (typeof w.is_fullscreen === 'function' && w.is_fullscreen()) return true;
     const m = global.screen.get_monitor_geometry(w.get_monitor());
     const r = _geom(w);
     return r.x <= m.x && r.y <= m.y &&
@@ -126,14 +128,16 @@ function _regular(avoid) {
     return global.screen.append_new_workspace(false, global.get_current_time());
 }
 
-function _dropWs(ws) {
+function _dropWs(ws, later) {
+    if (later) // removing instantly after a window dies can crash Muffin
+        return void GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => { _dropWs(ws); return GLib.SOURCE_REMOVE; });
     if (global.screen.get_n_workspaces() > 1)
         global.screen.remove_workspace(ws, global.get_current_time());
     names.delete(ws);
 }
 
 function _claim(w) {
-    _cancelPending(w);
+    _unpend(w);
     const name = w.get_wm_class() || w.get_title() || 'fullscreen';
     const ws = global.screen.append_new_workspace(false, global.get_current_time());
     names.set(ws, name);
@@ -145,7 +149,7 @@ function _claim(w) {
 }
 
 function _release(w) {
-    _cancelPending(w);
+    _unpend(w);
     const rec = dedicated.get(w);
     dedicated.delete(w);
     if (!rec) return;
@@ -168,35 +172,21 @@ function _evict(ws, keep) {
     });
 }
 
-function _claimDeferred(w) {
-    if (pendingClaims.has(w) || pendingReleases.has(w)) return;
+function _pend(w, kind) { // defer a transition until the native animation settles
+    if (pend.has(w)) return;              // one pending transition per window
     const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
-        pendingClaims.delete(w);
-        if (conns.has(w) && _isFull(w) && !dedicated.has(w)) _claim(w);
+        pend.delete(w);
+        if (kind === 'claim' && conns.has(w) && _isFull(w) && !dedicated.has(w)) _claim(w);
+        else if (kind === 'release' && dedicated.has(w) && !_isFull(w)) _release(w);
         return GLib.SOURCE_REMOVE;
     });
-    pendingClaims.set(w, id);
+    pend.set(w, { id: id, kind: kind });
 }
 
-function _releaseDeferred(w) {
-    if (pendingReleases.has(w) || pendingClaims.has(w)) return;
-    const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
-        pendingReleases.delete(w);
-        if (dedicated.has(w) && !_isFull(w)) _release(w);
-        return GLib.SOURCE_REMOVE;
-    });
-    pendingReleases.set(w, id);
-}
-
-function _cancelPending(w) {
-    const cid = pendingClaims.get(w);
-    if (cid !== undefined) {
-        try { GLib.source_remove(cid); } catch (e) {}
-        pendingClaims.delete(w);
-    }
-    const rid = pendingReleases.get(w);
-    if (rid !== undefined) {
-        try { GLib.source_remove(rid); } catch (e) {}
-        pendingReleases.delete(w);
+function _unpend(w) {
+    const p = pend.get(w);
+    if (p) {
+        try { GLib.source_remove(p.id); } catch (e) {}
+        pend.delete(w);
     }
 }
